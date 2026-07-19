@@ -143,8 +143,7 @@ class ToolDropDetection:
 
         # ─────────────────────────────────────────────────[ config ]─────────────────────────────────────────────────
         # ────| primary
-        raw_accelerometers = config.getlist("accelerometer", "")  # now optional
-        toolchanger_name = config.get("toolchanger", "toolchanger")
+        raw_accelerometers = config.getlist("accelerometer", "")
         tool_param_key = config.get("tool_param_key", "params_accel")
         default_accel_type = config.get("default_accel_type", "adxl345")
 
@@ -406,8 +405,6 @@ class ToolDropDetection:
     optional frequency and data rate to overwrite config defined."""
 
     def _cmd_polling_start(self, gcmd):
-        wait = gcmd.get("ASYNC", "TRUE") == "FALSE"
-
         freq_req = float(gcmd.get("FREQ", self.def_freq))
         freq = min(freq_req, MAX_POLL_FREQ)
         if freq != freq_req:
