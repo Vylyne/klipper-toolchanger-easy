@@ -1,14 +1,6 @@
 # klipper-toolchanger Easy Install
 
-# Requires Klipper 0.13.0-457 or greater
-
-To roll back to a known working Klipper version use the following commands: 
-```
-sudo service klipper stop
-cd ~/klipper
-git checkout e605fd18560fbb5a7413ca12b72325ad4e18de16
-sudo service klipper start
-```
+# Requires Klipper 0.13.0-707 or greater
 
 ## Please Read this before starting!
 The purpose of (yet another) fork of the Viesturz/klipper-toolchanger repo is to attempt to simplify the installation for StealthChanger users.  This repo combines the configuration, macros, and Python into a single repo.  It also outlines patterns for overriding configuration to ease installation and allow easier updates. 
