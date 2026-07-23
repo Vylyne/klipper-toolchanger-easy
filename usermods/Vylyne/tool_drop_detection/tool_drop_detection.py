@@ -3,7 +3,7 @@
 from __future__ import annotations
 import math, statistics, collections, types, copy, re
 from typing import Dict, Deque, List, Tuple, Sequence, Union
-from ...Contomo.tool_drop_detection import adxl345
+from . import adxl345
 
 
 _Number = Union[float, Tuple[float, float, float]]
