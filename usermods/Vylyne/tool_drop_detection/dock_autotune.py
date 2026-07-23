@@ -71,6 +71,7 @@ class DockAutotune:
         self.tc = self.printer.lookup_object(self.toolchanger_name)
         self.tdd = self.printer.lookup_object('tool_drop_detection')
         self.toolhead = self.printer.lookup_object('toolhead')
+        self.heaters = self.printer.lookup_object('heaters')
         self.reactor = self.printer.get_reactor()
 
     # ─── small helpers ──────────────────────────────────────────────────
@@ -110,6 +111,9 @@ class DockAutotune:
         self.short = short
         self.phase = PHASE_BUSY
 
+        heater = tool.extruder.get_heater() if tool.extruder else None
+        heater_target = heater.get_status(curtime)['target'] if heater else 0.0
+
         # Snapshot everything we are about to touch so it can be restored
         # exactly, whether we finish, cancel, or the printer errors out.
         self.orig = {
@@ -119,6 +123,8 @@ class DockAutotune:
             'pickup_path': copy.deepcopy(tool.params['params_pickup_path']),
             'verify_tool_pickup': self.tc.verify_tool_pickup,
             'max_accel': self.toolhead.get_status(curtime)['max_accel'],
+            'heater': heater,
+            'heater_target': heater_target,
         }
 
         stripped_path = []
@@ -128,6 +134,16 @@ class DockAutotune:
             stripped_path.append(step)
         tool.set_parameter('params_pickup_path', stripped_path)
         self.tc.verify_tool_pickup = False
+
+        if heater and heater_target:
+            # The pickup path's own M109 (if any) waits for whatever the
+            # CURRENT target is -- with this at 0 up front, every one of the
+            # many pickups in the scan sees "wait for 0", a no-op, instead of
+            # repeatedly reheating/waiting for a target this run has no use
+            # for at all.
+            gcmd.respond_info(
+                "Turning off hotend for the duration (was %.0f C)" % (heater_target,))
+            self.heaters.set_temperature(heater, 0.0, False)
 
         self.gcode.run_script_from_command('STOP_TOOL_PROBE_CRASH_DETECTION')
         self._set_accel(self.orig['max_accel'] / 5.0)
@@ -332,6 +348,12 @@ class DockAutotune:
                 self._run_scan(gcmd)
 
     # ─── completion / cancel ────────────────────────────────────────────
+    def _restore_heater(self):
+        heater = self.orig.get('heater')
+        target = self.orig.get('heater_target')
+        if heater and target:
+            self.heaters.set_temperature(heater, target, False)
+
     def _finish(self, gcmd):
         self.tdd.stop_polling([self.short])
         self.tool.set_parameter('params_park_x', round(self.best['x'], 3))
@@ -339,6 +361,7 @@ class DockAutotune:
         self.tool.reset_parameter('params_path_speed')
         self.tool.reset_parameter('params_pickup_path')
         self.tc.verify_tool_pickup = self.orig['verify_tool_pickup']
+        self._restore_heater()
         self.gcode.run_script_from_command('START_TOOL_PROBE_CRASH_DETECTION')
         self._set_accel(self.orig['max_accel'])
 
@@ -366,6 +389,7 @@ class DockAutotune:
         self.tool.set_parameter('params_park_x', self.orig['px'])
         self.tool.set_parameter('params_park_y', self.orig['py'])
         self.tc.verify_tool_pickup = self.orig['verify_tool_pickup']
+        self._restore_heater()
         self.gcode.run_script_from_command('START_TOOL_PROBE_CRASH_DETECTION')
         self._set_accel(self.orig['max_accel'])
 
