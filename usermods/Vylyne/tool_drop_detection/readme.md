@@ -95,15 +95,20 @@ Walks the *currently active* tool's `params_park_x` / `params_park_y` in small s
 - threshold: (default: 0.1) -> peak-g increase (vs the best found so far) still considered "close enough" to keep walking
 - changes_per: (default: 5) -> dock/undock cycles averaged per candidate position
 - abort_on_g: (default: 15) -> peak-g that always pauses, no recheck
-- guard_recheck_count / guard_recheck_delay: (default: 2 / 0.3) -> a tilt trip gets rechecked this many times, this many seconds apart, but *only* when the toolchanger's own tool-presence sensor confirms the tool is actually seated. A high-g trip is never auto-rechecked -- see below.
+- guard_recheck_count / guard_recheck_delay: (default: 2 / 0.3) -> a tilt trip gets a quick, cheap settle-reread this many times, this many seconds apart, but *only* when the toolchanger's own tool-presence sensor confirms the tool is actually seated -- see below.
+- confirm_retries: (default: 2) -> if a trip survives that, the whole candidate is re-measured from scratch (a real redock) up to this many more times before it's treated as persistent -- see below.
 - toolchanger: (default: `toolchanger`) -> name of the `[toolchanger]` section to drive
 - poll_freq / poll_rate: (default: 5 / 1600) -> accelerometer polling frequency/rate during the run
 - baseline_settle / measure_settle: (default: 1.0 / 0.25) -> seconds to settle after undocking / after each pickup, before trusting a reading
 - debug: (default: False)
 
-### why it pauses, and what Retry does
+### what happens on a trip
 
-A trip (tilt or high-g) shows a prompt with **Retry** / **Abort**. Retry always re-attempts the actual measurement -- a real undock/redock, not just a re-read -- so a transient deceleration spike usually clears on its own. For tilt specifically, if the tool is confirmed as detected/present, the extra rereads it automatically first (`guard_recheck_*`) and only bothers you if it's still tilted after that; a high-g trip skips that auto-recheck since the peak reading is shared with the in-progress measurement and only a real redock (i.e. Retry) can trustworthily refresh it. Presence is checked via whichever mechanism your printer actually has configured: a per-tool `detection_pin` (`[tool ...]`), or a shared `[tool_probe ...]` (`tool_probe_endstop`) acting as a virtual presence sensor -- if neither is configured, every tilt trip pauses immediately with no auto-recheck.
+A tilt trip (pitch/roll over tolerance) gets a quick, cheap settle-reread first (`guard_recheck_*`, no redock) -- but only when the tool is confirmed detected/present, since that's what rules out "this is actually a drop" before bothering to filter noise. Presence is checked via whichever mechanism your printer actually has configured: a per-tool `detection_pin` (`[tool ...]`), or a shared `[tool_probe ...]` (`tool_probe_endstop`) acting as a virtual presence sensor -- if neither is configured, this step is skipped entirely.
+
+If it's still bad after that (or it was a high-g trip, which skips straight to this step -- a cheap reread can't help there since the peak reading is shared with the in-progress measurement), the whole candidate gets re-measured from scratch up to `confirm_retries` more times -- a real undock/redock each time, not just a reread. Any clean attempt in there is treated as the real reading and the earlier trip(s) as a one-off.
+
+If *every* attempt trips and the tool is still confirmed present: mid-scan, this is treated as "this candidate is past the edge of what's mechanically viable" rather than a real drop, so it's silently walked back to the best position found so far and the scan moves on to the next direction/axis -- no prompt, no interruption. The final "Done" report notes how many times this happened. Only when a trip can't be corroborated as the tool still being present (or it happens before the pre-scan baseline has even seeded a direction to back off from) does it pause with **Retry** / **Abort**.
 
 If tilt trips keep happening even with the tool genuinely secure, check that `tool_drop_detection`'s own reference baseline has actually been captured for that accelerometer (`TDD_SET_SHUTTLE_DEFAULTS`, or `TDD_REFERENCE_SET ACCEL=...`) -- without it, "roll"/"pitch" are measured against a raw `(0,0,1)` vertical reference, not this tool's actual seated orientation, and a perfectly fine mounting angle can read as a large, *persistent* tilt that no amount of rechecking will ever clear (rechecking only helps with transient noise, not a genuinely uncalibrated baseline). Consider adding the resulting `default_<accel>` line from `TDD_REFERENCE_DUMP` to your config so it survives a restart, rather than only setting it in-session.
 

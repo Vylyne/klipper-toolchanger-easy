@@ -35,6 +35,7 @@ class DockAutotune:
         self.measure_settle = config.getfloat('measure_settle', 0.25, minval=0.)
         self.guard_recheck_count = config.getint('guard_recheck_count', 2, minval=0)
         self.guard_recheck_delay = config.getfloat('guard_recheck_delay', 0.3, minval=0.)
+        self.confirm_retries = config.getint('confirm_retries', 2, minval=0)
         self.debug = config.getboolean('debug', False)
 
         self.phase = PHASE_IDLE
@@ -51,6 +52,7 @@ class DockAutotune:
         self.base_peak = 0.0
         self.dock_pitch = 0.0
         self.dock_roll = 0.0
+        self.backoff_count = 0
         self._last_guard_info = {}
 
         self.printer.register_event_handler('klippy:connect', self._handle_connect)
@@ -110,6 +112,7 @@ class DockAutotune:
         self.tool = tool
         self.short = short
         self.phase = PHASE_BUSY
+        self.backoff_count = 0
 
         # Snapshot everything we are about to touch so it can be restored
         # exactly, whether we finish, cancel, or the printer errors out.
@@ -192,32 +195,66 @@ class DockAutotune:
         self._record_baseline(gcmd)
 
     # ─── measurement / hill-climb ───────────────────────────────────────
-    def _measure(self, gcmd, resume_phase):
+    def _measure(self, gcmd):
         """Dock/undock changes_per times, returning the averaged peak, or
-        None if the guard tripped (a pause prompt is already showing).
-        `resume_phase` tags where Retry should pick back up: 'baseline' while
-        still measuring the pre-scan reference position, 'scanning' once the
-        axis/direction walk (self.walk/self.best) has actually been seeded."""
+        None if the guard tripped (after its own quick settle-reread)."""
         peaks = []
         for _ in range(self.changes_per):
             self.tc.select_tool(gcmd, None, "")
             self.tc.select_tool(gcmd, self.tool, "")
             self._settle(self.measure_settle)
-            if not self._guard_ok(gcmd, resume_phase):
+            if not self._guard_ok(gcmd):
                 return None
             peaks.append(self.tdd.peak(self.short))
             self.tdd.reset_polling([self.short])
         return round(sum(peaks) / len(peaks), 5)
 
+    def _measure_confirmed(self, gcmd):
+        """Run _measure at the current candidate, retrying (a fresh redock,
+        not just a reread) up to confirm_retries more times if it trips --
+        any attempt coming back clean is treated as the real reading and the
+        earlier trip(s) as a one-off. Returns (avg_peak, tripped); tripped is
+        only True once EVERY attempt has failed, at which point
+        self._last_guard_info reflects the final attempt."""
+        for attempt in range(1 + self.confirm_retries):
+            avg_peak = self._measure(gcmd)
+            if avg_peak is not None:
+                return avg_peak, False
+            if self.debug and attempt < self.confirm_retries:
+                gcmd.respond_info(
+                    "[dock_autotune] trip on attempt %d/%d, retrying to confirm" % (
+                        attempt + 1, 1 + self.confirm_retries))
+        return None, True
+
+    def _pause(self, resume_phase):
+        info = self._last_guard_info
+        self.resume_phase = resume_phase
+        self.phase = PHASE_PAUSED
+
+        lines = [
+            "action:prompt_begin Dock alignment issue",
+            "action:prompt_text Pitch: %.2f deg, Roll: %.2f deg" % (info['pitch'], info['roll']),
+            "action:prompt_text Peak: %.2f g" % (info['peak'],),
+        ]
+        if info['tool_present']:
+            lines.append(
+                "action:prompt_text Tool IS detected on shuttle - may be a transient spike")
+        lines += [
+            "action:prompt_button Retry|_TC_DOCK_AUTOTUNE_RESUME|warning",
+            "action:prompt_footer_button Abort|TC_DOCK_AUTOTUNE_CANCEL|error",
+            "action:prompt_show",
+        ]
+        self._prompt(*lines)
+
     def _begin_measurement(self, gcmd):
         self._set_accel(self.orig['max_accel'] / 2.0)
         self.tool.set_parameter('params_path_speed', self.orig['path_speed'] / 2.0)
 
-        if not self._guard_ok(gcmd, 'baseline'):
-            return
-
-        base_peak = self._measure(gcmd, 'baseline')
-        if base_peak is None:
+        base_peak, tripped = self._measure_confirmed(gcmd)
+        if tripped:
+            # No direction has been seeded yet to back off from -- always
+            # needs a human, regardless of tool_present.
+            self._pause('baseline')
             return
 
         self.base_peak = base_peak
@@ -235,16 +272,35 @@ class DockAutotune:
 
     def _walk_direction(self, gcmd, axis, direction):
         """Step `axis` in `direction` while it keeps improving (or stays within
-        threshold), snapping back to the true best once it regresses. Returns
-        False if the guard tripped mid-walk (state is left resumable)."""
+        threshold), snapping back to the true best once it regresses -- either
+        because it got worse, or because a confirmed-persistent guard trip
+        backed it off (the tool is still corroborated present, so continuing
+        further this way is assumed to only get worse, not better). Returns
+        False only when a trip can't be corroborated and needs a human;
+        state is then left resumable."""
         step = self.step_mm * direction
         while abs(self.cur_step + step) <= self.range_mm:
             cand = round(self.walk[axis] + step, 3)
             self.tool.set_parameter('params_park_%s' % (axis,), cand)
 
-            avg_peak = self._measure(gcmd, 'scanning')
-            if avg_peak is None:
-                return False
+            avg_peak, tripped = self._measure_confirmed(gcmd)
+            if tripped:
+                if not self._last_guard_info.get('tool_present'):
+                    self._pause('scanning')
+                    return False
+                self.backoff_count += 1
+                info = self._last_guard_info
+                gcmd.respond_info(
+                    "Guard tripped %d/%d attempts at this candidate (pitch=%.2f "
+                    "roll=%.2f peak=%.2fg, tool detected on shuttle) -- backing "
+                    "off %s%s." % (
+                        1 + self.confirm_retries, 1 + self.confirm_retries,
+                        info['pitch'], info['roll'], info['peak'],
+                        axis, '+' if direction > 0 else '-'))
+                self.tool.set_parameter('params_park_%s' % (axis,), round(self.best[axis], 3))
+                self.walk[axis] = self.best[axis]
+                self.toolhead.wait_moves()
+                break
 
             delta = avg_peak - self.best_peak
             if delta <= self.threshold:
@@ -290,7 +346,12 @@ class DockAutotune:
         status = probe.get_status(self.reactor.monotonic())
         return status.get('active_tool_number') == self.tool.tool_number
 
-    def _guard_ok(self, gcmd, resume_phase):
+    def _guard_ok(self, gcmd):
+        """One evaluation of current sensor state, including a quick
+        settle-reread for a tilt trip (cheap, no redock). Returns True if
+        fine. On failure, records self._last_guard_info and returns False --
+        no prompt, no phase change; the caller (via _measure_confirmed)
+        decides what a trip means."""
         rot = self.tdd.rotation(self.short, 'current')
         pitch, roll = rot['pitch'], rot['roll']
         peak = self.tdd.peak(self.short)
@@ -306,7 +367,8 @@ class DockAutotune:
         # drop, and it is cheap to reread. A high-g trip is NOT auto-rechecked
         # even when corroborated: session peak is max-hold and shared with the
         # in-flight measurement, so a trustworthy recheck needs a full
-        # undock/redock, not just a reread -- that's what Retry already does.
+        # undock/redock, not just a reread -- _measure_confirmed's retry loop
+        # is what provides that for high-g.
         tool_present = self._tool_present()
 
         if tilting and not high_g and tool_present:
@@ -322,24 +384,6 @@ class DockAutotune:
         self._last_guard_info = {
             'pitch': pitch, 'roll': roll, 'peak': peak, 'tool_present': tool_present,
         }
-        self.resume_phase = resume_phase
-        self.phase = PHASE_PAUSED
-
-        info = self._last_guard_info
-        lines = [
-            "action:prompt_begin Dock alignment issue",
-            "action:prompt_text Pitch: %.2f deg, Roll: %.2f deg" % (info['pitch'], info['roll']),
-            "action:prompt_text Peak: %.2f g" % (info['peak'],),
-        ]
-        if info['tool_present']:
-            lines.append(
-                "action:prompt_text Tool IS detected on shuttle - may be a transient spike")
-        lines += [
-            "action:prompt_button Retry|_TC_DOCK_AUTOTUNE_RESUME|warning",
-            "action:prompt_footer_button Abort|TC_DOCK_AUTOTUNE_CANCEL|error",
-            "action:prompt_show",
-        ]
-        self._prompt(*lines)
         return False
 
     def cmd_RESUME(self, gcmd):
@@ -375,6 +419,10 @@ class DockAutotune:
                 dx, dy, self.base_peak, self.best_peak))
         gcmd.respond_info("params_park_x: %.3f" % (self.best['x'],))
         gcmd.respond_info("params_park_y: %.3f" % (self.best['y'],))
+        if self.backoff_count:
+            gcmd.respond_info(
+                "%d guard trip(s) were auto-backed-off near the search range edge "
+                "(see console log above for details)." % (self.backoff_count,))
         self.phase = PHASE_IDLE
         self.resume_phase = None
 
