@@ -111,9 +111,6 @@ class DockAutotune:
         self.short = short
         self.phase = PHASE_BUSY
 
-        heater = tool.extruder.get_heater() if tool.extruder else None
-        heater_target = heater.get_status(curtime)['target'] if heater else 0.0
-
         # Snapshot everything we are about to touch so it can be restored
         # exactly, whether we finish, cancel, or the printer errors out.
         self.orig = {
@@ -123,8 +120,6 @@ class DockAutotune:
             'pickup_path': copy.deepcopy(tool.params['params_pickup_path']),
             'verify_tool_pickup': self.tc.verify_tool_pickup,
             'max_accel': self.toolhead.get_status(curtime)['max_accel'],
-            'heater': heater,
-            'heater_target': heater_target,
         }
 
         stripped_path = []
@@ -135,14 +130,14 @@ class DockAutotune:
         tool.set_parameter('params_pickup_path', stripped_path)
         self.tc.verify_tool_pickup = False
 
-        if heater and heater_target:
-            # The pickup path's own M109 (if any) waits for whatever the
-            # CURRENT target is -- with this at 0 up front, every one of the
-            # many pickups in the scan sees "wait for 0", a no-op, instead of
-            # repeatedly reheating/waiting for a target this run has no use
-            # for at all.
-            gcmd.respond_info(
-                "Turning off hotend for the duration (was %.0f C)" % (heater_target,))
+        # The pickup path's own M109 (if any) waits for whatever the CURRENT
+        # target is -- turned off here so every pickup in the scan sees
+        # "wait for 0", a no-op, instead of repeatedly reheating/waiting for
+        # a target (e.g. left on from a prior QGL/probing sequence) this run
+        # has no use for. Not restored afterward: autotune doesn't run mid-
+        # print, so there's nothing to resume back up to.
+        heater = tool.extruder.get_heater() if tool.extruder else None
+        if heater and heater.get_status(curtime)['target']:
             self.heaters.set_temperature(heater, 0.0, False)
 
         self.gcode.run_script_from_command('STOP_TOOL_PROBE_CRASH_DETECTION')
@@ -280,6 +275,21 @@ class DockAutotune:
         self._finish(gcmd)
 
     # ─── guard ──────────────────────────────────────────────────────────
+    def _tool_present(self):
+        """Best-effort corroboration that self.tool is the one actually
+        mounted right now, via whichever presence mechanism is configured:
+        a per-tool detection_pin (toolchanger.detected_tool), or -- since
+        require_tool_present setups commonly use a shared tool-mounted probe
+        instead -- tool_probe_endstop acting as a virtual presence sensor."""
+        if self.tc.has_detection and self.tc.detected_tool is self.tool:
+            return True
+        probe = self.printer.lookup_object('probe', default=None)
+        if probe is None or not hasattr(probe, 'active_tool_number'):
+            return False
+        self.gcode.run_script_from_command('DETECT_ACTIVE_TOOL_PROBE')
+        status = probe.get_status(self.reactor.monotonic())
+        return status.get('active_tool_number') == self.tool.tool_number
+
     def _guard_ok(self, gcmd, resume_phase):
         rot = self.tdd.rotation(self.short, 'current')
         pitch, roll = rot['pitch'], rot['roll']
@@ -297,7 +307,7 @@ class DockAutotune:
         # even when corroborated: session peak is max-hold and shared with the
         # in-flight measurement, so a trustworthy recheck needs a full
         # undock/redock, not just a reread -- that's what Retry already does.
-        tool_present = self.tc.has_detection and self.tc.detected_tool is self.tool
+        tool_present = self._tool_present()
 
         if tilting and not high_g and tool_present:
             for _ in range(self.guard_recheck_count):
@@ -348,12 +358,6 @@ class DockAutotune:
                 self._run_scan(gcmd)
 
     # ─── completion / cancel ────────────────────────────────────────────
-    def _restore_heater(self):
-        heater = self.orig.get('heater')
-        target = self.orig.get('heater_target')
-        if heater and target:
-            self.heaters.set_temperature(heater, target, False)
-
     def _finish(self, gcmd):
         self.tdd.stop_polling([self.short])
         self.tool.set_parameter('params_park_x', round(self.best['x'], 3))
@@ -361,7 +365,6 @@ class DockAutotune:
         self.tool.reset_parameter('params_path_speed')
         self.tool.reset_parameter('params_pickup_path')
         self.tc.verify_tool_pickup = self.orig['verify_tool_pickup']
-        self._restore_heater()
         self.gcode.run_script_from_command('START_TOOL_PROBE_CRASH_DETECTION')
         self._set_accel(self.orig['max_accel'])
 
@@ -389,7 +392,6 @@ class DockAutotune:
         self.tool.set_parameter('params_park_x', self.orig['px'])
         self.tool.set_parameter('params_park_y', self.orig['py'])
         self.tc.verify_tool_pickup = self.orig['verify_tool_pickup']
-        self._restore_heater()
         self.gcode.run_script_from_command('START_TOOL_PROBE_CRASH_DETECTION')
         self._set_accel(self.orig['max_accel'])
 
