@@ -16,14 +16,18 @@ cd usermods/Vylyne/tool_drop_detection
 ./install.sh
 ```
 
-Symlinks `tool_drop_detection.py` and `dock_autotune.py` into `klippy/extras/`, and symlinks the example `.cfg` files into `~/printer_data/config/tool_drop_detection/`. It does not touch `printer.cfg` for you -- add both includes yourself:
+Symlinks `tool_drop_detection.py` and `dock_autotune.py` into `klippy/extras/`. The example `.cfg` files are **copied** (not symlinked) into `~/printer_data/config/toolchanger/tool_drop_detection/` -- Mainsail/Fluidd's config editor can't save through a symlink, and these are meant to be tuned per-printer anyway. An existing copy is never overwritten by a re-run; if it differs from the template you get a diff instead, so nothing you've tuned gets clobbered.
+
+If `~/printer_data/config/toolchanger/toolchanger-config.cfg` exists and doesn't already reference `tool_drop_detection`, the installer prepends these two lines to it, commented out:
 
 ```
-[include tool_drop_detection/tool_drop_detection.cfg]
-[include tool_drop_detection/dock_autotune.cfg]
+#[include tool_drop_detection/tool_drop_detection.cfg]
+#[include tool_drop_detection/dock_autotune.cfg]
 ```
 
-...then fill in `accelerometer:` (and per-tool `params_accel:`) for your printer -- see below. Override `KLIPPER_PATH` / `CONFIG_PATH` env vars if your install isn't at the defaults (`~/klipper`, `~/printer_data/config`). To remove everything: `./uninstall.sh` (leaves your `printer.cfg` includes for you to delete).
+Review `tool_drop_detection.cfg` / `dock_autotune.cfg`, fill in `accelerometer:` (and per-tool `params_accel:`) for your printer -- see below -- then uncomment those two lines and restart Klipper. If that file doesn't exist, the installer just prints the two lines for you to add wherever your `printer.cfg` includes live.
+
+Override `KLIPPER_PATH` / `CONFIG_PATH` env vars if your install isn't at the defaults (`~/klipper`, `~/printer_data/config`). To remove everything: `./uninstall.sh` -- it only deletes a config copy if it's still identical to the shipped template; a customized one is left in place, and any `[include ...]` lines you added are left for you to remove.
 
 ## How it works
 

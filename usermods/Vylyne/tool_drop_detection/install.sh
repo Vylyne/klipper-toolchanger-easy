@@ -4,11 +4,11 @@
 #   - accelerometer-based tool-drop / dock-tilt detection (tool_drop_detection.py)
 #   - TC_DOCK_AUTOTUNE dock parking-position autotune (dock_autotune.py)
 #
-# Symlinks both extras into Klipper's klippy/extras/, and symlinks the
-# example configs into your config directory so you can review/edit them
-# in place. This script does NOT touch your printer.cfg -- you still need
-# to add the [include ...] lines yourself and configure [tool_drop_detection]
-# for your printer's accelerometers. See readme.md.
+# Symlinks both extras into Klipper's klippy/extras/. The example configs
+# are COPIED (not symlinked) into your config directory: Mainsail/Fluidd's
+# config editor can't save through a symlink, and these configs are meant
+# to be tuned per-printer anyway. An existing copy is never overwritten --
+# if it differs from the template you get a diff instead. See readme.md.
 
 set -eu
 export LC_ALL=C
@@ -16,7 +16,8 @@ export LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KLIPPER_PATH="${KLIPPER_PATH:-${HOME}/klipper}"
 CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
-USERMOD_CONFIG_DIR="${CONFIG_PATH}/tool_drop_detection"
+USERMOD_CONFIG_DIR="${CONFIG_PATH}/toolchanger/tool_drop_detection"
+TOOLCHANGER_CONFIG="${CONFIG_PATH}/toolchanger/toolchanger-config.cfg"
 
 function preflight_checks {
     if [ "$EUID" -eq 0 ]; then
@@ -36,27 +37,59 @@ function link_extras {
     ln -sfn "${SCRIPT_DIR}/dock_autotune.py" "${KLIPPER_PATH}/klippy/extras/dock_autotune.py"
 }
 
-function link_configs {
-    echo "[INSTALL] Linking example configs into ${USERMOD_CONFIG_DIR}/..."
-    mkdir -p "${USERMOD_CONFIG_DIR}"
-    ln -sfn "${SCRIPT_DIR}/tool_drop_detection.cfg" "${USERMOD_CONFIG_DIR}/tool_drop_detection.cfg"
-    ln -sfn "${SCRIPT_DIR}/dock_autotune.cfg" "${USERMOD_CONFIG_DIR}/dock_autotune.cfg"
+
+# Copy src -> dst unless dst already exists. An existing copy is left
+# untouched even if it differs from the template -- it's your tuned
+# accelerometer/threshold values, not something to overwrite -- but the
+# diff is shown so you can see what changed if the template was updated.
+function install_config {
+    local src="$1" dst="$2"
+    if [ -e "${dst}" ]; then
+        if diff -q --strip-trailing-cr "${src}" "${dst}" >/dev/null 2>&1; then
+            echo "[SKIP] ${dst} already up to date."
+        else
+            echo "[SKIP] ${dst} already exists and differs from the template -- not overwriting your changes."
+            echo "       diff (template vs. yours):"
+            diff -u --strip-trailing-cr "${src}" "${dst}" | sed 's/^/       /'
+        fi
+    else
+        cp "${src}" "${dst}"
+        echo "[INSTALL] Copied ${dst}"
+    fi
 }
 
-function remind_include {
-    local includes_found=1
-    if [ -d "${CONFIG_PATH}" ] && grep -Rq "tool_drop_detection/tool_drop_detection.cfg" "${CONFIG_PATH}" 2>/dev/null; then
-        includes_found=0
-    fi
-    if [ "${includes_found}" -ne 0 ]; then
+function install_configs {
+    echo "[INSTALL] Installing example configs into ${USERMOD_CONFIG_DIR}/..."
+    mkdir -p "${USERMOD_CONFIG_DIR}"
+    install_config "${SCRIPT_DIR}/tool_drop_detection.cfg" "${USERMOD_CONFIG_DIR}/tool_drop_detection.cfg"
+    install_config "${SCRIPT_DIR}/dock_autotune.cfg" "${USERMOD_CONFIG_DIR}/dock_autotune.cfg"
+}
+
+# Offer to wire the includes into toolchanger-config.cfg (commented out --
+# you still have to review the configs and opt in) if that file exists and
+# doesn't already reference tool_drop_detection. Idempotent: safe to re-run.
+function offer_includes {
+    if [ ! -f "${TOOLCHANGER_CONFIG}" ]; then
         echo ""
-        echo "[ACTION NEEDED] Add these to your printer.cfg, then fill in your"
-        echo "accelerometer names / thresholds (see readme.md):"
+        echo "[ACTION NEEDED] ${TOOLCHANGER_CONFIG} not found -- add these to your"
+        echo "printer config yourself, then restart Klipper:"
         echo "    [include tool_drop_detection/tool_drop_detection.cfg]"
         echo "    [include tool_drop_detection/dock_autotune.cfg]"
+        return
     fi
-    echo ""
-    echo "[NEXT] Once printer.cfg is updated, restart Klipper (e.g. 'sudo systemctl restart klipper')."
+    if grep -q "tool_drop_detection/tool_drop_detection.cfg" "${TOOLCHANGER_CONFIG}"; then
+        echo "[SKIP] ${TOOLCHANGER_CONFIG} already references tool_drop_detection."
+        return
+    fi
+    {
+        echo "#[include tool_drop_detection/tool_drop_detection.cfg]"
+        echo "#[include tool_drop_detection/dock_autotune.cfg]"
+        cat "${TOOLCHANGER_CONFIG}"
+    } > "${TOOLCHANGER_CONFIG}.new"
+    mv "${TOOLCHANGER_CONFIG}.new" "${TOOLCHANGER_CONFIG}"
+    echo "[INSTALL] Added commented includes to the top of ${TOOLCHANGER_CONFIG}"
+    echo "          Review tool_drop_detection.cfg / dock_autotune.cfg, uncomment"
+    echo "          them, then restart Klipper."
 }
 
 printf "\n==========================================\n"
@@ -65,8 +98,8 @@ printf "==========================================\n\n"
 
 preflight_checks
 link_extras
-link_configs
-remind_include
+install_configs
+offer_includes
 
 echo ""
-echo "[DONE] Extras and example configs linked."
+echo "[DONE] Extras linked, example configs installed."

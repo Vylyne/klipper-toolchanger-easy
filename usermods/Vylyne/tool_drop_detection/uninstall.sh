@@ -1,8 +1,10 @@
 #!/bin/bash
 #
 # Uninstalls the tool_drop_detection usermod: removes the extras symlinks
-# from Klipper and the config symlinks from your config directory.
-# Does NOT edit your printer.cfg -- remove any
+# from Klipper, and removes the installed example configs IF they are still
+# byte-identical to the shipped template (a customized config -- tuned
+# accelerometer names, thresholds, park positions -- is left in place).
+# Does NOT edit your printer config -- remove any
 #   [include tool_drop_detection/...]
 # lines yourself, then restart Klipper.
 
@@ -12,7 +14,7 @@ export LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KLIPPER_PATH="${KLIPPER_PATH:-${HOME}/klipper}"
 CONFIG_PATH="${CONFIG_PATH:-${HOME}/printer_data/config}"
-USERMOD_CONFIG_DIR="${CONFIG_PATH}/tool_drop_detection"
+USERMOD_CONFIG_DIR="${CONFIG_PATH}/toolchanger/tool_drop_detection"
 
 function preflight_checks {
     if [ "$EUID" -eq 0 ]; then
@@ -43,10 +45,26 @@ function unlink_extras {
     unlink_if_matches "${KLIPPER_PATH}/klippy/extras/dock_autotune.py" "${SCRIPT_DIR}/dock_autotune.py"
 }
 
-function unlink_configs {
-    echo "[UNINSTALL] Removing linked example configs..."
-    unlink_if_matches "${USERMOD_CONFIG_DIR}/tool_drop_detection.cfg" "${SCRIPT_DIR}/tool_drop_detection.cfg"
-    unlink_if_matches "${USERMOD_CONFIG_DIR}/dock_autotune.cfg" "${SCRIPT_DIR}/dock_autotune.cfg"
+# Only delete an installed config copy if it's untouched -- if you've
+# customized it we leave it in place rather than risk deleting something
+# you'd want back.
+function remove_config {
+    local src="$1" dst="$2"
+    if [ ! -e "${dst}" ]; then
+        return
+    fi
+    if diff -q --strip-trailing-cr "${src}" "${dst}" >/dev/null 2>&1; then
+        rm "${dst}"
+        echo "[REMOVE] ${dst}"
+    else
+        echo "[SKIP] ${dst} has been customized, leaving it in place."
+    fi
+}
+
+function remove_configs {
+    echo "[UNINSTALL] Removing unmodified example configs..."
+    remove_config "${SCRIPT_DIR}/tool_drop_detection.cfg" "${USERMOD_CONFIG_DIR}/tool_drop_detection.cfg"
+    remove_config "${SCRIPT_DIR}/dock_autotune.cfg" "${USERMOD_CONFIG_DIR}/dock_autotune.cfg"
     rmdir "${USERMOD_CONFIG_DIR}" 2>/dev/null || true
 }
 
@@ -56,8 +74,9 @@ printf "============================================\n\n"
 
 preflight_checks
 unlink_extras
-unlink_configs
+remove_configs
 
 echo ""
-echo "[ACTION NEEDED] Remove any [include tool_drop_detection/...] lines from"
-echo "your printer.cfg, then restart Klipper."
+echo "[ACTION NEEDED] If a customized config is still present, or you added"
+echo "[include tool_drop_detection/...] lines yourself (or via install.sh's"
+echo "toolchanger-config.cfg offer), remove those, then restart Klipper."
