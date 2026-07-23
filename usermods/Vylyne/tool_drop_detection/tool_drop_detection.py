@@ -3,7 +3,7 @@
 from __future__ import annotations
 import math, statistics, collections, types, copy, re
 from typing import Dict, Deque, List, Tuple, Sequence, Union
-from . import adxl345
+from ...Contomo.tool_drop_detection import adxl345
 
 
 _Number = Union[float, Tuple[float, float, float]]
@@ -362,6 +362,21 @@ class ToolDropDetection:
     def get_status(self, *_):
         return self._data
 
+    # ─── programmatic accessors, for other extras (e.g. dock_autotune) ───
+    def resolve(self, token):
+        """raw/full/short accelerometer name -> short alias, or None if unknown."""
+        full = self.name_to_full.get(token)
+        short = self.full_to_short.get(full) if full else None
+        if short is None and token in self.readers:
+            short = token
+        return short
+
+    def peak(self, short):
+        return self._data[short]["session"]["peak"]
+
+    def rotation(self, short, which="current"):
+        return dict(self._data[short][which]["rotation"])
+
     def run_gcode(self, template, extra_context):
         # template is a template object, not raw string!!
         ctx = {**template.create_template_context(), **extra_context}
@@ -404,19 +419,24 @@ class ToolDropDetection:
     cmd_TDD_POLLING_START_help = """[ACCEL] [FREQ] [RATE] - Start polling accelerometer(s) \
     optional frequency and data rate to overwrite config defined."""
 
-    def _cmd_polling_start(self, gcmd):
-        freq_req = float(gcmd.get("FREQ", self.def_freq))
-        freq = min(freq_req, MAX_POLL_FREQ)
-        if freq != freq_req:
-            gcmd.respond_info(f"FREQ clamped to {freq} Hz (MAX_POLL_FREQ)")
-
-        rate = self._rate(gcmd)
-
+    def start_polling(self, names, freq=None, rate=None):
+        """[names] short accel aliases -> start continuous polling for each not already running.
+        Returns (started, effective_freq, effective_rate)."""
+        freq = min(float(freq) if freq is not None else self.def_freq, MAX_POLL_FREQ)
+        rate = min(_RATE_CHOICES, key=lambda x: abs(x - int(rate if rate is not None else self.def_rate)))
         started = []
-        for n in self._targets(gcmd):
+        for n in names:
             if n not in self.pollers:
                 self.pollers[n] = _Poller(self, n, freq, rate)
                 started.append(n)
+        return started, freq, rate
+
+    def _cmd_polling_start(self, gcmd):
+        freq_req = float(gcmd.get("FREQ", self.def_freq))
+        rate_req = self._rate(gcmd)
+        started, freq, rate = self.start_polling(self._targets(gcmd), freq_req, rate_req)
+        if freq != freq_req:
+            gcmd.respond_info(f"FREQ clamped to {freq} Hz (MAX_POLL_FREQ)")
 
         if started:
             msg = ", ".join(f"{n} (freq={freq} Hz, rate={rate} Hz)" for n in started)
@@ -426,24 +446,31 @@ class ToolDropDetection:
 
     cmd_TDD_POLLING_STOP_help = "[ACCEL] - Stop polling accelerometer(s)"
 
-    def _cmd_polling_stop(self, gcmd):
+    def stop_polling(self, names):
         stopped: List[str] = []
-        for n in self._targets(gcmd):
+        for n in names:
             p = self.pollers.pop(n, None)
             if p:
                 p.stop()
                 stopped.append(n)
+        return stopped
+
+    def _cmd_polling_stop(self, gcmd):
+        stopped = self.stop_polling(self._targets(gcmd))
         gcmd.respond_info("Stopped: " + (", ".join(stopped) if stopped else "none"))
 
     cmd_TDD_POLLING_RESET_help = "[ACCEL] - Reset polling session data"
 
-    def _cmd_polling_reset(self, gcmd):
+    def reset_polling(self, names):
         r = []
-        for n in self._targets(gcmd):
+        for n in names:
             if n in self.pollers:
                 self.pollers[n].reset()
                 r.append(n)
+        return r
 
+    def _cmd_polling_reset(self, gcmd):
+        r = self.reset_polling(self._targets(gcmd))
         gcmd.respond_info("Session reset for: " + ", ".join(r))
 
     def _reset(self):
@@ -562,25 +589,31 @@ class ToolDropDetection:
         "[ACCEL] - Set reference baseline data from the current session"
     )
 
+    def set_reference(self, short):
+        """Capture current orientation as the new baseline for `short`. Returns False if no data."""
+        poll = self.pollers.get(short)
+        if poll:  # reuse live window
+            poll._update_reference(poll.xyz_history)
+            return True
+        samples = self.readers[short].window(1)
+        if not samples:
+            return False
+        tmp = types.SimpleNamespace(
+            parent=self,
+            short=short,
+            dec=self.decimals,
+            defaults=self.defaults[short],
+        )  # hack
+        _Poller._update_reference(tmp, samples)  # type: ignore # static method call
+        return True
+
     def _cmd_set_reference(self, gcmd):
         stored, targets = 0, self._targets(gcmd) or list(self.readers)
         for short in targets:
-            poll = self.pollers.get(short)
-            if poll:  # reuse live window
-                poll._update_reference(poll.xyz_history)
-            else:  # one-shot reader
-                samples = self.readers[short].window(1)
-                if not samples:
-                    gcmd.respond_info(f"[TDD] no data from '{short}'")
-                    continue
-                tmp = types.SimpleNamespace(
-                    parent=self,
-                    short=short,
-                    dec=self.decimals,
-                    defaults=self.defaults[short],
-                )  # hack
-                _Poller._update_reference(tmp, samples)  # type: ignore # static method call
-            stored += 1
+            if self.set_reference(short):
+                stored += 1
+            else:
+                gcmd.respond_info(f"[TDD] no data from '{short}'")
         gcmd.respond_info(f"[tool_drop_detection] stored {stored} reference set(s)")
 
     cmd_TDD_REFERENCE_DUMP_help = (
