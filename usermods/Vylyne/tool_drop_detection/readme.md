@@ -9,6 +9,21 @@
 currently there is no actual way to obtain any accel values inside of macros. query prints to console, and the other dump to files.
 
 
+## Installation
+
+```bash
+cd usermods/Vylyne/tool_drop_detection
+./install.sh
+```
+
+Symlinks `tool_drop_detection.py` and `dock_autotune.py` into `klippy/extras/`, and symlinks the example `.cfg` files into `~/printer_data/config/tool_drop_detection/`. It does not touch `printer.cfg` for you -- add both includes yourself:
+
+```
+[include tool_drop_detection/tool_drop_detection.cfg]
+[include tool_drop_detection/dock_autotune.cfg]
+```
+
+...then fill in `accelerometer:` (and per-tool `params_accel:`) for your printer -- see below. Override `KLIPPER_PATH` / `CONFIG_PATH` env vars if your install isn't at the defaults (`~/klipper`, `~/printer_data/config`). To remove everything: `./uninstall.sh` (leaves your `printer.cfg` includes for you to delete).
 
 ## How it works
 
@@ -65,5 +80,29 @@ printer.tool_drop_detection.$NAME$.->
  * `TDD_START` ([LIMIT_PITCH=0.0-180.0] [LIMIT_ROLL=0.0-180.0]) or [LIMIT_ANGLE=0.0-180.0] [/CRASH_MINTIME=0.0-100.0/] [/LIMIT_G=0.0-25/]
  * `TDD_STOP`  stops tool drop detection for that tool or all
 
+
+## **[dock_autotune]**
+
+Walks the *currently active* tool's `params_park_x` / `params_park_y` in small steps and keeps whichever offset minimises peak-g, using `tool_drop_detection` to measure it. Needs `tool_drop_detection` already configured with an accelerometer for the tool being tuned (via `accelerometer:` and/or the tool's `params_accel`).
+
+- range_mm: (default: 1.0) -> ± search window, mm
+- step_mm: (default: 0.1) -> mm increment
+- pitch_tol / roll_tol: (default: 45) -> ° vs the dock's own baseline tilt, tripping the pause prompt
+- threshold: (default: 0.1) -> peak-g increase (vs the best found so far) still considered "close enough" to keep walking
+- changes_per: (default: 5) -> dock/undock cycles averaged per candidate position
+- abort_on_g: (default: 15) -> peak-g that always pauses, no recheck
+- guard_recheck_count / guard_recheck_delay: (default: 2 / 0.3) -> a tilt trip gets rechecked this many times, this many seconds apart, but *only* when the toolchanger's own tool-presence sensor confirms the tool is actually seated. A high-g trip is never auto-rechecked -- see below.
+- toolchanger: (default: `toolchanger`) -> name of the `[toolchanger]` section to drive
+- poll_freq / poll_rate: (default: 5 / 1600) -> accelerometer polling frequency/rate during the run
+- baseline_settle / measure_settle: (default: 1.0 / 0.25) -> seconds to settle after undocking / after each pickup, before trusting a reading
+- debug: (default: False)
+
+### why it pauses, and what Retry does
+
+A trip (tilt or high-g) shows a prompt with **Retry** / **Abort**. Retry always re-attempts the actual measurement -- a real undock/redock, not just a re-read -- so a transient deceleration spike usually clears on its own. For tilt specifically, if the toolchanger reports the tool as detected/present, the extra rereads it automatically first (`guard_recheck_*`) and only bothers you if it's still tilted after that; a high-g trip skips that auto-recheck since the peak reading is shared with the in-progress measurement and only a real redock (i.e. Retry) can trustworthily refresh it.
+
+## commands
+ * `TC_DOCK_AUTOTUNE` -> Start autotuning park_x/park_y for the currently active tool. Shows a baseline-tilt confirmation prompt (Record new / Continue), then walks X then Y.
+ * `TC_DOCK_AUTOTUNE_CANCEL` -> Abort an in-progress run and restore the tool's original park position, path speed, pickup path and `verify_tool_pickup`.
 
 
