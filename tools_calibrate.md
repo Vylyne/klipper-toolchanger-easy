@@ -112,3 +112,20 @@ All probing moves and final offsets will be printed in the console.
 - the nozzle is touching the probe - (and could have probed a few times already)
   - Likely the initial position was too far off-center. Try to position it more accurately.
   - The probe is lowered too much and/or not enough sideways - tweak `lower_z` and `spread`
+
+### Detecting whether a removable probe is plugged in
+
+If your probe is a removable fixture rather than a permanently mounted one, you can use its
+endstop state as a presence check from other macros (e.g. to raise clearance during QGL/homing
+so you don't crash into it when it's plugged in). `TOOL_CALIBRATE_QUERY_PROBE` refreshes and
+exposes the raw endstop state as `printer.tools_calibrate.calibration_probe`: `True` when
+triggered, `False` when not triggered. Add `QUIET=1` to suppress its console message when calling
+it from a macro.
+
+For a normally-closed (NC) probe wired per the `pin:` guidance above (no `!` inversion), the
+contacts are closed (continuity, not triggered) while idle and connected, and open (triggered)
+both while being touched *and* when unplugged. So outside of an active calibration touch,
+`calibration_probe == True` means the probe isn't plugged in: connected ⟺
+`not printer.tools_calibrate.calibration_probe`. Verify this polarity on your hardware by running
+`TOOL_CALIBRATE_QUERY_PROBE` with the probe unplugged and then plugged in (idle) — if it reads
+backwards, invert the check in your macros.
