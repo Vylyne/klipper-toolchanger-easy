@@ -13,9 +13,15 @@ See the [example](/examples/calibrate-offsets.cfg) folder for a full example.
 
 pin: GPIO pin (e.g., '^PG11')
      The pin Klipper will monitor to detect a probe trigger.
-     - depending on probe may require inversion (ie: !PG11)
-     - normally closed: nudge (no inversion)
-     - normally open: sexball [microswitch type] (inversion)
+     - normally-open vs normally-closed depends on how the switch is wired
+       (which COM/NO/NC lugs are used), not on the probe type as such - but
+       both the sexbolt and nudge, when built on the standard Voron
+       Z-endstop switch/PCB reference design, come out normally-closed,
+       since that board's traces fix which lugs are used.
+     - add inversion (ie: !PG11) if idle reads triggered, or drop it if idle
+       reads open - verify with TOOL_CALIBRATE_QUERY_PROBE before relying on
+       it (see "Detecting whether a removable probe is plugged in" below),
+       especially if your probe isn't built on that reference board.
 
 spread:               (mm)
     X/Y distance from center for probing sequence
@@ -29,6 +35,10 @@ lower_z:              (mm)
    Distance to lower the nozzle to hit. (0 -> slides over | 3-4 -> hits silicone sock)
    - 0.1-0.2 = minimal travel, may work, usually cleaner nozzle around here
    - 0.4-0.5 = safer hit margin, possibly less accurate.
+   - Can be overridden per-call with `LOWER_Z=` on `TOOL_LOCATE_SENSOR` /
+     `TOOL_CALIBRATE_TOOL_OFFSET`, e.g. to probe at several heights without
+     editing the config each time (see `DIAGNOSE_TOOL_OFFSET_PRECISION` in
+     `examples/easy-additions/calibrate-offsets.cfg`).
 
 travel_speed:         (mm/s)
    Move speed between probes 
@@ -91,6 +101,21 @@ Clean all nozzles thoroughly before calibrating.
 - For every other tool, run ```TOOL_CALIBRATE_TOOL_OFFSET``` to measure the offset from the first tool.
 
 All probing moves and final offsets will be printed in the console.
+
+### Diagnosing a suspicious tool offset
+
+If a non-baseline tool's calibrated Z offset seems consistently wrong (not just noisy from run to
+run), it helps to know whether you're looking at measurement noise or a real bias before changing
+anything. `DIAGNOSE_TOOL_OFFSET_PRECISION` (`examples/easy-additions/calibrate-offsets.cfg`)
+repeats the measurement several times at several `LOWER_Z` heights and prints the min/max/spread
+for each height:
+
+- Position and heat the tool as you would before `TOOL_LOCATE_SENSOR`/`TOOL_CALIBRATE_TOOL_OFFSET`.
+- Run `DIAGNOSE_TOOL_OFFSET_PRECISION BASELINE=1` for tool 0, or
+  `DIAGNOSE_TOOL_OFFSET_PRECISION` for any other tool (after tool 0's baseline has been captured).
+- A small, flat spread across heights points at noise (sampling/speed/retries) or something outside
+  this module entirely (nozzle cleanliness/wear). A spread that changes cleanly with height suggests
+  the nozzle/pin contact geometry itself is height-dependent for that tool.
 
 ### Calibrating nozzle bed probe.
 

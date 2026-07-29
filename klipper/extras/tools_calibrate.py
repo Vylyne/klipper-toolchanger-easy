@@ -65,11 +65,12 @@ class ToolsCalibrate:
         offset = direction_types[direction]
         start_pos = list(top_pos)
         start_pos[offset[0]] -= offset[1] * self.spread
+        lower_z = gcmd.get_float("LOWER_Z", self.lower_z, minval=0.)
         toolhead.manual_move([None, None, top_pos[2] + self.lift_z],
                              self.lift_speed)
         toolhead.manual_move([start_pos[0], start_pos[1], None],
                              self.travel_speed)
-        toolhead.manual_move([None, None, top_pos[2] - self.lower_z],
+        toolhead.manual_move([None, None, top_pos[2] - lower_z],
                              self.lift_speed)
         return self.probe_multi_axis.run_probe(direction, gcmd, samples=samples,
                                                max_distance=self.spread * 1.8)[
