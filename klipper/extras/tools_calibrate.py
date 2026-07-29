@@ -223,6 +223,12 @@ class PrinterProbeMultiAxis:
                                                  minval=0.)
         self.samples_retries = config.getint('samples_tolerance_retries', 0,
                                              minval=0)
+        # Recovery from a transient "triggered prior to movement" fault -
+        # a real/persistent trigger still aborts immediately.
+        self.pretrigger_retries = config.getint('pretrigger_retries', 2,
+                                                minval=0)
+        self.pretrigger_settle_time = config.getfloat(
+            'pretrigger_settle_time', 0.3, minval=0.)
         # Register xyz_virtual_endstop pin
         self.printer.lookup_object('pins').register_chip('probe_multi_axis',
                                                          self)
@@ -239,20 +245,48 @@ class PrinterProbeMultiAxis:
             return gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.)
         return self.lift_speed
 
-    def _probe(self, speed, axis, sense, max_distance):
+    def _probe(self, speed, axis, sense, max_distance, gcmd):
         phoming = self.printer.lookup_object('homing')
         pos = self._get_target_position(axis, sense, max_distance)
-        try:
-            epos = phoming.probing_move(self.mcu_probe[axis], pos, speed)
-        except self.printer.command_error as e:
-            reason = str(e)
-            if "Timeout during endstop homing" in reason:
-                reason += HINT_TIMEOUT
-            raise self.printer.command_error(reason)
+        pretrigger_retries = gcmd.get_int("PRETRIGGER_RETRIES",
+                                          self.pretrigger_retries, minval=0)
+        attempt = 0
+        while True:
+            try:
+                epos = phoming.probing_move(self.mcu_probe[axis], pos, speed)
+                break
+            except self.printer.command_error as e:
+                reason = str(e)
+                if "Timeout during endstop homing" in reason:
+                    raise self.printer.command_error(reason + HINT_TIMEOUT)
+                if ("triggered prior to movement" in reason
+                        and attempt < pretrigger_retries):
+                    self._dwell(self.pretrigger_settle_time)
+                    if self._query_endstop(axis):
+                        # Still triggered after settling - a real/persistent
+                        # trigger, not a transient blip. Not safe to mask.
+                        raise self.printer.command_error(reason)
+                    attempt += 1
+                    self.gcode.respond_info(
+                        "%s endstop read triggered prior to movement but "
+                        "is clear after settling - retrying probe (%d/%d)"
+                        % ('xyz'[axis], attempt, pretrigger_retries))
+                    continue
+                raise self.printer.command_error(reason)
         # self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
         self.gcode.respond_info("Probe made contact at %.6f,%.6f,%.6f"
                                 % (epos[0], epos[1], epos[2]))
         return epos[:3]
+
+    def _dwell(self, delay):
+        if delay <= 0.:
+            return
+        self.printer.lookup_object('toolhead').dwell(delay)
+
+    def _query_endstop(self, axis):
+        toolhead = self.printer.lookup_object('toolhead')
+        print_time = toolhead.get_last_move_time()
+        return self.mcu_probe[axis].query_endstop(print_time)
 
     def _get_target_position(self, axis, sense, max_distance):
         toolhead = self.printer.lookup_object('toolhead')
@@ -321,7 +355,7 @@ class PrinterProbeMultiAxis:
         positions = []
         while len(positions) < sample_count:
             # Probe position
-            pos = self._probe(speed, axis, sense, max_distance)
+            pos = self._probe(speed, axis, sense, max_distance, gcmd)
             positions.append(pos)
             # Check samples tolerance
             axis_positions = [p[axis] for p in positions]

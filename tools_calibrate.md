@@ -74,7 +74,22 @@ samples_tolerance_retries:
 
 samples_result:       ['median' | 'average']
      output result method 
-     
+
+pretrigger_retries: (default 2)
+     If a probe move fails with "Probe triggered prior to movement", this is
+     usually a transient blip (switch bounce, a marginal/intermittent
+     connection) rather than the nozzle genuinely resting on the probe.
+     After a short settle (`pretrigger_settle_time`), the endstop is
+     re-queried: if it now reads clear, the probe move is retried instead of
+     aborting the whole calibration. If it's still triggered after settling,
+     it's treated as real and raised immediately - this never masks a
+     genuine trigger, only a transient one. Set to 0 to disable and restore
+     the old hard-fail-immediately behavior. Overridable per-call with
+     `PRETRIGGER_RETRIES=`.
+
+pretrigger_settle_time: (seconds, default 0.3)
+     Dwell time before re-checking the endstop for `pretrigger_retries`.
+
 trigger_to_bottom_z:  (mm)
     Used in trigger calibration calculations.
     Defines Z distance from calibration probe *trigger* to mechanical bottom out.
@@ -129,6 +144,17 @@ All probing moves and final offsets will be printed in the console.
 ## Troubleshooting
 
 ### Probe triggered prior to movement
+
+As of `pretrigger_retries` (default 2), a single transient occurrence of this error no longer
+aborts the whole calibration: the endstop is re-checked after a short settle, and if it's clear the
+probe move is retried automatically (you'll see "...retrying probe (N/M)" in the console). If it's
+still triggered after settling, or retries are exhausted, it's raised as before - so if you're
+still seeing a hard failure, you're looking at a real or persistent fault, not a one-off blip. Work
+through the checks below, and see "Diagnosing a suspicious tool offset" above for a repeatable way
+to reproduce it. Frequent retries showing up in the console (even when they eventually succeed) are
+themselves a signal of a marginal connection worth chasing down (loose crimp, worn contact, etc.)
+before it gets bad enough to exhaust the retry budget.
+
 - the nozzle is not touching the probe
   - Check if the probe is triggering without touching  
   - use a multimeter to check for continuity and if it changes when pressing down on the probe. (or use `TOOL_CALIBRATE_QUERY_PROBE` to query the status of the probe)
