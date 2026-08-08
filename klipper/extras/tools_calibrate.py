@@ -60,12 +60,20 @@ class ToolsCalibrate:
         self.gcode.register_command('TOOL_CALIBRATE_QUERY_PROBE',
                                     self.cmd_TOOL_CALIBRATE_QUERY_PROBE,
                                     desc=self.cmd_TOOL_CALIBRATE_QUERY_PROBE_help)
+        self.gcode.register_command('TOOL_CALIBRATE_RESET_COUNTERS',
+                                    self.cmd_TOOL_CALIBRATE_RESET_COUNTERS,
+                                    desc=self.cmd_TOOL_CALIBRATE_RESET_COUNTERS_help)
+        self.gcode.register_command('TOOL_CALIBRATE_DIAGNOSE',
+                                    self.cmd_TOOL_CALIBRATE_DIAGNOSE,
+                                    desc=self.cmd_TOOL_CALIBRATE_DIAGNOSE_help)
 
-    def probe_xy(self, toolhead, top_pos, direction, gcmd, samples=None):
+    def probe_xy(self, toolhead, top_pos, direction, gcmd, samples=None,
+                 lower_z=None):
         offset = direction_types[direction]
         start_pos = list(top_pos)
         start_pos[offset[0]] -= offset[1] * self.spread
-        lower_z = gcmd.get_float("LOWER_Z", self.lower_z, minval=0.)
+        if lower_z is None:
+            lower_z = gcmd.get_float("LOWER_Z", self.lower_z, minval=0.)
         toolhead.manual_move([None, None, top_pos[2] + self.lift_z],
                              self.lift_speed)
         toolhead.manual_move([start_pos[0], start_pos[1], None],
@@ -76,19 +84,24 @@ class ToolsCalibrate:
                                                max_distance=self.spread * 1.8)[
             offset[0]]
 
-    def calibrate_xy(self, toolhead, top_pos, gcmd, samples=None):
-        left_x = self.probe_xy(toolhead, top_pos, 'x+', gcmd, samples=samples)
-        right_x = self.probe_xy(toolhead, top_pos, 'x-', gcmd, samples=samples)
-        near_y = self.probe_xy(toolhead, top_pos, 'y+', gcmd, samples=samples)
-        far_y = self.probe_xy(toolhead, top_pos, 'y-', gcmd, samples=samples)
+    def calibrate_xy(self, toolhead, top_pos, gcmd, samples=None,
+                     lower_z=None):
+        left_x = self.probe_xy(toolhead, top_pos, 'x+', gcmd, samples=samples,
+                               lower_z=lower_z)
+        right_x = self.probe_xy(toolhead, top_pos, 'x-', gcmd, samples=samples,
+                                lower_z=lower_z)
+        near_y = self.probe_xy(toolhead, top_pos, 'y+', gcmd, samples=samples,
+                               lower_z=lower_z)
+        far_y = self.probe_xy(toolhead, top_pos, 'y-', gcmd, samples=samples,
+                              lower_z=lower_z)
         return [(left_x + right_x) / 2., (near_y + far_y) / 2.]
 
-    def locate_sensor(self, gcmd):
+    def locate_sensor(self, gcmd, lower_z=None):
         toolhead = self.printer.lookup_object('toolhead')
         position = toolhead.get_position()
         downPos = self.probe_multi_axis.run_probe("z-", gcmd, samples=1)
         center_x, center_y = self.calibrate_xy(toolhead, downPos, gcmd,
-                                               samples=1)
+                                               samples=1, lower_z=lower_z)
 
         toolhead.manual_move([None, None, downPos[2] + self.lift_z],
                              self.lift_speed)
@@ -98,7 +111,7 @@ class ToolsCalibrate:
         # Now redo X and Y, since we have a more accurate center.
         center_x, center_y = self.calibrate_xy(toolhead,
                                                [center_x, center_y, center_z],
-                                               gcmd)
+                                               gcmd, lower_z=lower_z)
 
         # rest above center
         position[0] = center_x
@@ -178,13 +191,77 @@ class ToolsCalibrate:
         toolhead.set_position(start_pos)
 
     def get_status(self, eventtime):
+        probe = self.probe_multi_axis
         return {'last_result': self.last_result,
                 'last_probe_offset': self.last_probe_offset,
                 'calibration_probe_inactive': self.calibration_probe_inactive,
                 'calibration_probe': self.calibration_probe_inactive,
                 'last_x_result': self.last_result[0],
                 'last_y_result': self.last_result[1],
-                'last_z_result': self.last_result[2]}
+                'last_z_result': self.last_result[2],
+                'pretrigger_retries_total': probe.pretrigger_retries_total,
+                'pretrigger_retries_run': probe.pretrigger_retries_run,
+                'pretrigger_aborts_total': probe.pretrigger_aborts_total,
+                'pretrigger_aborts_run': probe.pretrigger_aborts_run}
+
+    cmd_TOOL_CALIBRATE_DIAGNOSE_help = (
+        "Repeat a tool offset measurement at several LOWER_Z heights and "
+        "report the spread, to tell measurement noise apart from a real "
+        "height-dependent bias")
+
+    def _median(self, sorted_vals):
+        middle = len(sorted_vals) // 2
+        if len(sorted_vals) & 1:
+            return sorted_vals[middle]
+        return (sorted_vals[middle - 1] + sorted_vals[middle]) / 2.
+
+    def cmd_TOOL_CALIBRATE_DIAGNOSE(self, gcmd):
+        heights_str = gcmd.get("HEIGHTS", "0.1,0.3,0.6,1.0")
+        repeats = gcmd.get_int("REPEATS", 5, minval=2)
+        baseline = gcmd.get_int("BASELINE", 0)
+        try:
+            heights = [float(h) for h in heights_str.split(',') if h.strip()]
+        except ValueError:
+            raise gcmd.error("Invalid HEIGHTS list: '%s'" % (heights_str,))
+        if not heights:
+            raise gcmd.error("HEIGHTS must list at least one value")
+        if not baseline and not self.sensor_location:
+            raise gcmd.error("No recorded sensor location, please run "
+                             "TOOL_LOCATE_SENSOR with tool 0 first, or pass "
+                             "BASELINE=1 to measure tool 0 itself")
+        probe = self.probe_multi_axis
+        probe.reset_run_counters()
+        for height in heights:
+            retries_before = probe.pretrigger_retries_run
+            results = []
+            for _ in range(repeats):
+                location = self.locate_sensor(gcmd, lower_z=height)
+                if not baseline:
+                    location = [location[i] - self.sensor_location[i]
+                                for i in range(3)]
+                results.append(location)
+            for axis in range(3):
+                values = sorted([r[axis] for r in results])
+                self.gcode.respond_info(
+                    "LOWER_Z=%.3f %s: min=%.4f max=%.4f spread=%.4f "
+                    "median=%.4f"
+                    % (height, 'XYZ'[axis], values[0], values[-1],
+                       values[-1] - values[0], self._median(values)))
+            self.gcode.respond_info(
+                "LOWER_Z=%.3f: %d probe retries over %d measurements"
+                % (height, probe.pretrigger_retries_run - retries_before,
+                   repeats))
+        self.gcode.respond_info(
+            "Totals: %d retries, %d aborts"
+            % (probe.pretrigger_retries_run, probe.pretrigger_aborts_run))
+
+    cmd_TOOL_CALIBRATE_RESET_COUNTERS_help = ("Zero the per-run pretrigger "
+                                              "retry/abort counters")
+
+    def cmd_TOOL_CALIBRATE_RESET_COUNTERS(self, gcmd):
+        self.probe_multi_axis.reset_run_counters()
+        if not gcmd.get_int('QUIET', 0):
+            gcmd.respond_info("Pretrigger run counters reset")
 
     cmd_TOOL_CALIBRATE_QUERY_PROBE_help = "Return the state of calibration probe"
     def cmd_TOOL_CALIBRATE_QUERY_PROBE(self, gcmd):
@@ -229,6 +306,14 @@ class PrinterProbeMultiAxis:
                                                 minval=0)
         self.pretrigger_settle_time = config.getfloat(
             'pretrigger_settle_time', 0.3, minval=0.)
+        # Counters for the two pretrigger outcomes. Their ratio is
+        # diagnostic: recovering after a settle points at a mechanical
+        # fault (probe not reseating in time), while aborting because the
+        # endstop is still triggered points at a persistently open circuit.
+        self.pretrigger_retries_total = 0
+        self.pretrigger_retries_run = 0
+        self.pretrigger_aborts_total = 0
+        self.pretrigger_aborts_run = 0
         # Register xyz_virtual_endstop pin
         self.printer.lookup_object('pins').register_chip('probe_multi_axis',
                                                          self)
@@ -259,24 +344,35 @@ class PrinterProbeMultiAxis:
                 reason = str(e)
                 if "Timeout during endstop homing" in reason:
                     raise self.printer.command_error(reason + HINT_TIMEOUT)
-                if ("triggered prior to movement" in reason
-                        and attempt < pretrigger_retries):
-                    self._dwell(self.pretrigger_settle_time)
-                    if self._query_endstop(axis):
+                if "triggered prior to movement" in reason:
+                    if attempt < pretrigger_retries:
+                        self._dwell(self.pretrigger_settle_time)
+                        if not self._query_endstop(axis):
+                            attempt += 1
+                            self.pretrigger_retries_total += 1
+                            self.pretrigger_retries_run += 1
+                            self.gcode.respond_info(
+                                "%s endstop read triggered prior to movement "
+                                "but is clear after settling - retrying probe "
+                                "(%d/%d)"
+                                % ('xyz'[axis], attempt, pretrigger_retries))
+                            continue
                         # Still triggered after settling - a real/persistent
                         # trigger, not a transient blip. Not safe to mask.
-                        raise self.printer.command_error(reason)
-                    attempt += 1
-                    self.gcode.respond_info(
-                        "%s endstop read triggered prior to movement but "
-                        "is clear after settling - retrying probe (%d/%d)"
-                        % ('xyz'[axis], attempt, pretrigger_retries))
-                    continue
+                    # Counted whether we ran out of retries, never had any, or
+                    # found it still triggered - all mean a probe we couldn't
+                    # clear, as opposed to one that recovered.
+                    self.pretrigger_aborts_total += 1
+                    self.pretrigger_aborts_run += 1
                 raise self.printer.command_error(reason)
         # self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
         self.gcode.respond_info("Probe made contact at %.6f,%.6f,%.6f"
                                 % (epos[0], epos[1], epos[2]))
         return epos[:3]
+
+    def reset_run_counters(self):
+        self.pretrigger_retries_run = 0
+        self.pretrigger_aborts_run = 0
 
     def _dwell(self, delay):
         if delay <= 0.:

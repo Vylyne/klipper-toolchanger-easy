@@ -128,9 +128,36 @@ for each height:
 - Position and heat the tool as you would before `TOOL_LOCATE_SENSOR`/`TOOL_CALIBRATE_TOOL_OFFSET`.
 - Run `DIAGNOSE_TOOL_OFFSET_PRECISION BASELINE=1` for tool 0, or
   `DIAGNOSE_TOOL_OFFSET_PRECISION` for any other tool (after tool 0's baseline has been captured).
+  `HEIGHTS` and `REPEATS` are overridable, e.g. `HEIGHTS="0.1,0.5" REPEATS=8`.
 - A small, flat spread across heights points at noise (sampling/speed/retries) or something outside
   this module entirely (nozzle cleanliness/wear). A spread that changes cleanly with height suggests
   the nozzle/pin contact geometry itself is height-dependent for that tool.
+- Each run also reports probe retries per height and a retry/abort total (see
+  `pretrigger_retries` above). Because these faults are intermittent, the retry *rate* is a much
+  better signal than waiting for a hard failure: a change that takes you from 6 retries per run to
+  1 is visible immediately, where a hard failure might not recur for several runs by luck alone.
+
+The measurement loop lives in the `TOOL_CALIBRATE_DIAGNOSE` command rather than in the macro,
+because a `gcode_macro` cannot do it: Klipper renders a macro template in full *before* executing
+any of its commands, so a `printer.tools_calibrate.last_z_result` lookup inside a Jinja loop
+returns the same pre-probe value on every iteration rather than the result of each probe.
+
+### Counting intermittent probe faults
+
+`TOOL_CALIBRATE_RESET_COUNTERS` zeroes the per-run counters, which are exposed for use in your own
+macros as:
+
+```
+printer.tools_calibrate.pretrigger_retries_run     # recovered after settling, this run
+printer.tools_calibrate.pretrigger_aborts_run      # still triggered after settling, this run
+printer.tools_calibrate.pretrigger_retries_total   # since Klipper started
+printer.tools_calibrate.pretrigger_aborts_total    # since Klipper started
+```
+
+The *ratio* is diagnostic. Retries that recover after a settle suggest a mechanical fault - the
+probe not returning to its rest position quickly enough between touches. Aborts, where the endstop
+is still triggered after settling, suggest a persistently open circuit - contact resistance, oxide
+films on the contact surfaces, or a marginal connection somewhere in the wiring.
 
 ### Calibrating nozzle bed probe.
 
